@@ -20,9 +20,9 @@ void onBotReady(DiscordUser user) {
     Serial.println("Bot name: " + user.username);
     Serial.println("Bot ID: " + user.id);
     
-    // Reset connection state on successful connection
-    discord.resetReconnectionState();
-    discord.resetConnectionState();
+    // // Reset connection state on successful connection
+    // discord.resetReconnectionState();
+    // discord.resetConnectionState();
     
     // Send welcome message
     DiscordResponse response = discord.sendMessage(channelId, "🤖 ESP32 Bot connected successfully!");
@@ -164,10 +164,6 @@ void setup() {
     discord.onDebug(onDebug);
     discord.onRaw(onRawMessage);
     
-    // Test debug levels
-    Serial.println("🧪 Testing debug levels...");
-    onDebug("Test VERBOSE message", 3);
-    
     // Configure Discord Bot
     Serial.println("🔧 Setting bot token...");
     if (!discord.setBotToken(botToken)) {
@@ -175,9 +171,7 @@ void setup() {
         return;
     }
     Serial.println("✅ Bot token set successfully!");
-    
-    // Skip internet test, go straight to Discord API test
-    
+      
     // Test bot token
     if (!discord.testBotToken()) {
         Serial.println("❌ Bot token test failed!");

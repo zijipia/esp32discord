@@ -418,7 +418,8 @@ bool DiscordAPI::connectWebSocket() {
     _debugLog("Using gateway URL: " + gatewayUrl, DEBUG_LEVEL_VERBOSE);
     
     // Try different WebSocket configuration
-    _webSocket.begin(gatewayUrl.c_str(), 443, "/?v=10&encoding=json");
+    _webSocket.beginSSL(gatewayUrl.c_str(), 443, "/?v=10&encoding=json");
+    _webSocket.setAuthorization("", _botToken.c_str());
     _webSocket.setReconnectInterval(5000);
     _webSocket.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
         switch (type) {
@@ -684,9 +685,13 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
         return;
     }
     
+    if (doc["s"].is<int>()) {
+        _sequenceNumber = doc["s"].as<int>();
+    }
+
     int op = doc["op"].as<int>();
     String eventType = doc["t"].as<String>();
-    
+        
     _debugLog("Processing WebSocket event: OP=" + String(op) + ", Type=" + eventType, DEBUG_LEVEL_VERBOSE);
     
     switch (op) {
@@ -697,12 +702,9 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
                 _debugLog("Received HELLO, heartbeat interval: " + String(_heartbeatInterval) + "ms", DEBUG_LEVEL_INFO);
                 _debugLog("Session ID: " + _sessionId, DEBUG_LEVEL_VERBOSE);
                 _debugLog("Resume URL: " + _resumeGatewayUrl, DEBUG_LEVEL_VERBOSE);
-                
-                // Small delay before sending identify/resume to ensure connection is stable
-                delay(100);
-                
+                                
                 // Send Identify or Resume immediately after Hello (Discord spec requirement)
-                if (_sessionId.length() > 0 && _resumeGatewayUrl.length() > 0) {
+                if ( _sessionId.length() > 0 && _resumeGatewayUrl.length() > 0) {
                     _debugLog("Attempting to resume session after Hello", DEBUG_LEVEL_INFO);
                     _resume();
                 } else {
@@ -712,7 +714,6 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
             } else {
                 _debugLog("Invalid HELLO message format", DEBUG_LEVEL_ERROR);
                 // Still try to identify even if HELLO format is invalid
-                delay(100);
                 _identify();
             }
             break;
@@ -797,10 +798,7 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
             }
             break;
     }
-    
-    if (doc["s"].is<int>()) {
-        _sequenceNumber = doc["s"].as<int>();
-    }
+
 }
 
 void DiscordAPI::_sendHeartbeat() {
@@ -811,7 +809,11 @@ void DiscordAPI::_sendHeartbeat() {
     
     JsonDocument doc;
     doc["op"] = OPCODE_HEARTBEAT;
-    doc["d"] = _sequenceNumber;
+    if(_sequenceNumber >= 0) {
+        doc["d"] = _sequenceNumber;
+    }else{
+        doc["d"] = nullptr;
+    }
     
     String message;
     serializeJson(doc, message);
@@ -839,15 +841,17 @@ void DiscordAPI::_identify() {
     properties["browser"] = "DiscordBot";
     properties["device"] = "esp32";
     
-    d["compress"] = false;
-    d["large_threshold"] = 250;
+    // d["compress"] = false;
+    // d["large_threshold"] = 250;
     
     // Add intents - required for receiving messages
     d["intents"] = 512; // MESSAGE_CONTENT_INTENT (1 << 9) - allows reading message content
     
-    String message;
+    String message = "";
     serializeJson(doc, message);
-    
+
+    bool sent = _webSocket.sendTXT(message);
+
     // Debug: Log the identify packet (without token for security)
     String debugMessage = message;
     int tokenStart = debugMessage.indexOf("\"token\":\"");
@@ -859,7 +863,6 @@ void DiscordAPI::_identify() {
     }
     _debugLog("Sending IDENTIFY packet: " + debugMessage, DEBUG_LEVEL_INFO);
     
-    bool sent = _webSocket.sendTXT(message);
     if (sent) {
         _debugLog("IDENTIFY packet sent successfully", DEBUG_LEVEL_INFO);
         _debugLog("Waiting for READY event from Discord...", DEBUG_LEVEL_VERBOSE);
