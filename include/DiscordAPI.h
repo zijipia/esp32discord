@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
 
@@ -12,7 +13,7 @@
 #define DISCORD_WS_GATEWAY "wss://gateway.discord.gg/?v=10&encoding=json"
 
 // Discord API limits
-#define DISCORD_RATE_LIMIT 50  // requests per second
+#define DISCORD_RATE_LIMIT 50 // requests per second
 #define DISCORD_MAX_MESSAGE_LENGTH 2000
 
 // WebSocket opcodes
@@ -27,6 +28,7 @@
 #define OPCODE_INVALID_SESSION 9
 #define OPCODE_HELLO 10
 #define OPCODE_HEARTBEAT_ACK 11
+#define OPCODE_RESUMED 12
 
 // Event types
 #define EVENT_READY "READY"
@@ -124,7 +126,8 @@
 #define DEBUG_LEVEL_VERBOSE 3
 
 // Discord API Response structure
-struct DiscordResponse {
+struct DiscordResponse
+{
     int statusCode;
     String body;
     bool success;
@@ -132,7 +135,8 @@ struct DiscordResponse {
 };
 
 // Discord User structure
-struct DiscordUser {
+struct DiscordUser
+{
     String id;
     String username;
     String discriminator;
@@ -153,7 +157,8 @@ struct DiscordUser {
 };
 
 // Discord Message structure
-struct DiscordMessage {
+struct DiscordMessage
+{
     String id;
     String channel_id;
     String guild_id;
@@ -163,47 +168,48 @@ struct DiscordMessage {
     String edited_timestamp;
     bool tts;
     bool mention_everyone;
-    String* mentions;
+    String *mentions;
     int mentions_count;
-    String* mention_roles;
+    String *mention_roles;
     int mention_roles_count;
-    String* mention_channels;
+    String *mention_channels;
     int mention_channels_count;
-    String* attachments;
+    String *attachments;
     int attachments_count;
-    String* embeds;
+    String *embeds;
     int embeds_count;
-    String* reactions;
+    String *reactions;
     int reactions_count;
     String nonce;
     bool pinned;
     String webhook_id;
     int type;
-    String* activity;
-    String* application;
+    String *activity;
+    String *application;
     String application_id;
-    String* message_reference;
+    String *message_reference;
     int flags;
-    String* referenced_message;
-    String* interaction;
-    String* thread;
-    String* components;
+    String *referenced_message;
+    String *interaction;
+    String *thread;
+    String *components;
     int components_count;
-    String* sticker_items;
+    String *sticker_items;
     int sticker_items_count;
-    String* stickers;
+    String *stickers;
     int stickers_count;
     int position;
-    String* role_subscription_data;
+    String *role_subscription_data;
 };
 
 // Discord Channel structure
-struct DiscordChannel {
+struct DiscordChannel
+{
     String id;
     int type;
     String guild_id;
     int position;
-    String* permission_overwrites;
+    String *permission_overwrites;
     int permission_overwrites_count;
     String name;
     String topic;
@@ -212,7 +218,7 @@ struct DiscordChannel {
     int bitrate;
     int user_limit;
     int rate_limit_per_user;
-    String* recipients;
+    String *recipients;
     int recipients_count;
     String icon;
     String owner_id;
@@ -223,24 +229,25 @@ struct DiscordChannel {
     int video_quality_mode;
     int message_count;
     int member_count;
-    String* thread_metadata;
-    String* member;
+    String *thread_metadata;
+    String *member;
     int default_auto_archive_duration;
     String permissions;
     int flags;
-    String* total_message_sent;
-    String* available_tags;
+    String *total_message_sent;
+    String *available_tags;
     int available_tags_count;
-    String* applied_tags;
+    String *applied_tags;
     int applied_tags_count;
-    String* default_reaction_emoji;
+    String *default_reaction_emoji;
     int default_thread_rate_limit_per_user;
-    String* default_sort_order;
-    String* default_forum_layout;
+    String *default_sort_order;
+    String *default_forum_layout;
 };
 
 // Discord Guild structure
-struct DiscordGuild {
+struct DiscordGuild
+{
     String id;
     String name;
     String icon;
@@ -258,11 +265,11 @@ struct DiscordGuild {
     int verification_level;
     int default_message_notifications;
     int explicit_content_filter;
-    String* roles;
+    String *roles;
     int roles_count;
-    String* emojis;
+    String *emojis;
     int emojis_count;
-    String* features;
+    String *features;
     int features_count;
     int mfa_level;
     String application_id;
@@ -280,32 +287,33 @@ struct DiscordGuild {
     String public_updates_channel_id;
     int max_video_channel_users;
     int max_stage_video_channel_users;
-    String* approximate_member_count;
-    String* approximate_presence_count;
-    String* welcome_screen;
+    String *approximate_member_count;
+    String *approximate_presence_count;
+    String *welcome_screen;
     int nsfw_level;
-    String* stickers;
+    String *stickers;
     int stickers_count;
     bool premium_progress_bar_enabled;
     String safety_alerts_channel_id;
 };
 
 // Discord API Client class
-class DiscordAPI {
+class DiscordAPI
+{
 private:
     String _botToken;
     String _clientId;
     String _clientSecret;
     String _redirectUri;
-    WiFiClient _wifiClient;
+    WiFiClientSecure _wifiClient;
     HTTPClient _httpClient;
     WebSocketsClient _webSocket;
-    
+
     // Rate limiting
     unsigned long _lastRequestTime;
     int _requestCount;
     unsigned long _rateLimitReset;
-    
+
     // WebSocket state
     bool _wsConnected;
     bool _wsAuthenticated;
@@ -313,44 +321,66 @@ private:
     unsigned long _lastHeartbeat;
     int _sequenceNumber;
     String _sessionId;
-    
+    String _resumeGatewayUrl;
+
+    // Reconnection management
+    unsigned long _lastReconnectAttempt;
+    int _reconnectAttempts;
+    int _maxReconnectAttempts;
+    unsigned long _reconnectDelay;
+
+    // Connection stability
+    unsigned long _lastHeartbeatAck;
+    unsigned long _connectionStartTime;
+    int _heartbeatMissedCount;
+    int _maxHeartbeatMissed;
+
     // Event callbacks
     void (*_onReady)(DiscordUser user);
     void (*_onMessage)(DiscordMessage message);
     void (*_onGuildCreate)(DiscordGuild guild);
     void (*_onError)(String error);
     void (*_onDebug)(String message, int level);
-    
+    void (*_onRaw)(String rawMessage);
+
     // Internal methods
     String _getAuthHeader();
     DiscordResponse _makeRequest(String method, String endpoint, String body = "");
-    void _handleWebSocketEvent(JsonDocument& doc);
+    void _handleWebSocketEvent(JsonDocument &doc);
     void _sendHeartbeat();
     void _identify();
     void _resume();
-    void _parseUser(JsonObject userObj, DiscordUser& user);
-    void _parseMessage(JsonObject messageObj, DiscordMessage& message);
-    void _parseChannel(JsonObject channelObj, DiscordChannel& channel);
-    void _parseGuild(JsonObject guildObj, DiscordGuild& guild);
+    void _parseUser(JsonObject userObj, DiscordUser &user);
+    void _parseMessage(JsonObject messageObj, DiscordMessage &message);
+    void _parseChannel(JsonObject channelObj, DiscordChannel &channel);
+    void _parseGuild(JsonObject guildObj, DiscordGuild &guild);
     void _debugLog(String message, int level);
-    
+    bool _shouldReconnect();
+    void _handleReconnect();
+    bool _checkConnectionStability();
+    void _handleConnectionTimeout();
+
 public:
     // Constructor
     DiscordAPI();
-    
+
+    // Destructor
+    ~DiscordAPI();
+
     // Authentication methods
     bool setBotToken(String token);
     bool setOAuth2Credentials(String clientId, String clientSecret, String redirectUri);
     String getOAuth2URL(String scope = "identify");
     String exchangeCodeForToken(String code);
-    
+    bool testBotToken();
+
     // REST API methods
     DiscordUser getCurrentUser();
     DiscordUser getUser(String userId);
     DiscordGuild getGuild(String guildId);
     DiscordChannel getChannel(String channelId);
     DiscordMessage getMessage(String channelId, String messageId);
-    DiscordMessage* getChannelMessages(String channelId, int limit = 50, String before = "", String after = "", String around = "");
+    DiscordMessage *getChannelMessages(String channelId, int limit = 50, String before = "", String after = "", String around = "");
     DiscordResponse sendMessage(String channelId, String content, bool tts = false);
     DiscordResponse editMessage(String channelId, String messageId, String content);
     DiscordResponse deleteMessage(String channelId, String messageId);
@@ -358,20 +388,25 @@ public:
     DiscordResponse removeReaction(String channelId, String messageId, String emoji, String userId = "@me");
     DiscordResponse removeAllReactions(String channelId, String messageId);
     DiscordResponse removeAllReactionsForEmoji(String channelId, String messageId, String emoji);
-    
+
     // WebSocket methods
     bool connectWebSocket();
     void disconnectWebSocket();
     void loop();
     bool isWebSocketConnected();
-    
+    void resetReconnectionState();
+    void resetConnectionState();
+    void forceDisconnect();
+    void debugConnectionState();
+
     // Event handlers
     void onReady(void (*callback)(DiscordUser user));
     void onMessage(void (*callback)(DiscordMessage message));
     void onGuildCreate(void (*callback)(DiscordGuild guild));
     void onError(void (*callback)(String error));
     void onDebug(void (*callback)(String message, int level));
-    
+    void onRaw(void (*callback)(String rawMessage));
+
     // Utility methods
     String getBotInviteURL(String permissions = "0");
     String formatUserMention(String userId);
@@ -388,12 +423,12 @@ public:
     String formatSpoiler(String text);
     String formatQuote(String text);
     String formatBlockQuote(String text);
-    
+
     // Rate limiting
     bool isRateLimited();
     int getRemainingRequests();
     unsigned long getRateLimitReset();
-    
+
     // Error handling
     String getLastError();
     void clearError();

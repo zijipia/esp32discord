@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include "DiscordAPI.h"
 
 // WiFi Configuration
@@ -17,6 +19,10 @@ void onBotReady(DiscordUser user) {
     Serial.println("Bot is ready!");
     Serial.println("Bot name: " + user.username);
     Serial.println("Bot ID: " + user.id);
+    
+    // Reset connection state on successful connection
+    discord.resetReconnectionState();
+    discord.resetConnectionState();
     
     // Send welcome message
     DiscordResponse response = discord.sendMessage(channelId, "🤖 ESP32 Bot connected successfully!");
@@ -52,6 +58,8 @@ void onMessageReceived(DiscordMessage message) {
         helpText += "`!time` - View uptime\n";
         helpText += "`!help` - Show help\n";
         helpText += "`!status` - System status\n";
+        helpText += "`!debug` - Debug connection state\n";
+        helpText += "`!reset` - Reset connection\n";
         
         DiscordResponse response = discord.sendMessage(message.channel_id, helpText);
         if (response.success) {
@@ -68,6 +76,20 @@ void onMessageReceived(DiscordMessage message) {
         DiscordResponse response = discord.sendMessage(message.channel_id, statusText);
         if (response.success) {
             Serial.println("Sent system status!");
+        }
+    }
+    else if (message.content.startsWith("!debug")) {
+        discord.debugConnectionState();
+        DiscordResponse response = discord.sendMessage(message.channel_id, "🔍 Debug info sent to console");
+        if (response.success) {
+            Serial.println("Sent debug info!");
+        }
+    }
+    else if (message.content.startsWith("!reset")) {
+        discord.forceDisconnect();
+        DiscordResponse response = discord.sendMessage(message.channel_id, "🔄 Connection reset initiated");
+        if (response.success) {
+            Serial.println("Sent reset command!");
         }
     }
 }
@@ -94,10 +116,29 @@ void onDebug(String message, int level) {
             prefix = "🟢 [VERBOSE]";
             break;
         default:
-            prefix = "⚪ [DEBUG]";
+            prefix = "⚪ [DEBUG-" + String(level) + "]";
             break;
     }
     Serial.println(prefix + " " + message);
+}
+
+// Raw WebSocket message callback function
+void onRawMessage(String rawMessage) {
+    Serial.println("📨 Raw WS Message: " + rawMessage);
+    
+    // Check if this is a HELLO message
+    if (rawMessage.indexOf("\"op\":10") != -1) {
+        Serial.println("🎉 HELLO message received from Discord!");
+    }
+    
+    // Check if this is a READY message
+    if (rawMessage.indexOf("\"t\":\"READY\"") != -1) {
+        Serial.println("🎉 READY message received from Discord!");
+    }
+    
+    // You can parse the raw message here for custom handling
+    // For example, you might want to log all messages to a file
+    // or implement custom message filtering
 }
 
 void setup() {
@@ -116,30 +157,43 @@ void setup() {
     Serial.println("IP: " + WiFi.localIP().toString());
     Serial.println("Signal strength: " + String(WiFi.RSSI()) + " dBm");
     
-    // Configure Discord Bot
-    if (!discord.setBotToken(botToken)) {
-        Serial.println("❌ Error: Cannot set bot token!");
-        return;
-    }
-    
-    // Set up callbacks
+    // Set up callbacks FIRST before any Discord operations
     discord.onReady(onBotReady);
     discord.onMessage(onMessageReceived);
     discord.onError(onError);
     discord.onDebug(onDebug);
+    discord.onRaw(onRawMessage);
+    
+    // Test debug levels
+    Serial.println("🧪 Testing debug levels...");
+    onDebug("Test VERBOSE message", 3);
+    
+    // Configure Discord Bot
+    Serial.println("🔧 Setting bot token...");
+    if (!discord.setBotToken(botToken)) {
+        Serial.println("❌ Error: Cannot set bot token!");
+        return;
+    }
+    Serial.println("✅ Bot token set successfully!");
+    
+    // Skip internet test, go straight to Discord API test
+    
+    // Test bot token
+    if (!discord.testBotToken()) {
+        Serial.println("❌ Bot token test failed!");
+        return;
+    }
+    Serial.println("✅ Bot token valid!");
     
     // Connect WebSocket
     if (discord.connectWebSocket()) {
-        Serial.println("✅ Discord WebSocket connected!");
+        Serial.println("✅ WebSocket connected!");
     } else {
-        Serial.println("❌ Discord WebSocket connection failed!");
+        Serial.println("❌ WebSocket connection failed!");
     }
-    
-    Serial.println("🎉 Bot is ready to operate!");
 }
 
 void loop() {
-    // Process WebSocket events
     discord.loop();
     
     // Check WiFi connection
@@ -150,12 +204,33 @@ void loop() {
         delay(5000);
     }
     
-    // Check Discord connection
-    if (!discord.isWebSocketConnected()) {
-        Serial.println("⚠️ Discord disconnected, reconnecting...");
-        Serial.println("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
-        discord.connectWebSocket();
-        delay(5000);
+    // Discord reconnection is now handled automatically by the library
+    // Just monitor the connection status with reduced frequency
+    static unsigned long lastStatusCheck = 0;
+    static int disconnectCount = 0;
+    
+    if (millis() - lastStatusCheck > 60000) { // Check every 60 seconds
+        if (!discord.isWebSocketConnected()) {
+            disconnectCount++;
+            Serial.println("⚠️ Discord disconnected, library will handle reconnection");
+            Serial.println("Disconnect count: " + String(disconnectCount));
+            Serial.println("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
+            Serial.println("WiFi RSSI: " + String(WiFi.RSSI()) + " dBm");
+            
+            // If too many disconnects, force reset
+            if (disconnectCount > 5) { // Reduced threshold
+                Serial.println("🔄 Too many disconnects, forcing reset...");
+                discord.forceDisconnect();
+                disconnectCount = 0;
+            }
+        } else {
+            // Connection is stable
+            Serial.println("✅ Discord connection stable");
+            Serial.println("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
+            disconnectCount = 0; // Reset counter on stable connection
+        }
+        
+        lastStatusCheck = millis();
     }
     
     // Send periodic message (every 5 minutes)
