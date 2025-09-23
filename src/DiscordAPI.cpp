@@ -10,7 +10,7 @@ DiscordAPI::DiscordAPI() {
     _wsAuthenticated = false;
     _heartbeatInterval = 0;
     _lastHeartbeat = 0;
-    _sequenceNumber = 0;
+    _sequenceNumber = -1;
     _sessionId = "";
     _resumeGatewayUrl = "";
     _lastRequestTime = 0;
@@ -30,6 +30,7 @@ DiscordAPI::DiscordAPI() {
     _connectionStartTime = 0;
     _heartbeatMissedCount = 0;
     _maxHeartbeatMissed = 3;
+    _gatewayIntents = DISCORD_INTENT_DEFAULT;
     
     // Configure SSL for HTTPS requests
     _wifiClient.setInsecure(); // Skip certificate verification for now
@@ -413,24 +414,54 @@ bool DiscordAPI::connectWebSocket() {
     
     _debugLog("Connecting to WebSocket...", DEBUG_LEVEL_INFO);
     
-    // Use resume URL if available, otherwise use default gateway
-    String gatewayUrl = _resumeGatewayUrl.length() > 0 ? _resumeGatewayUrl : "gateway.discord.gg";
-    _debugLog("Using gateway URL: " + gatewayUrl, DEBUG_LEVEL_VERBOSE);
-    
+    // Determine gateway host and path
+    const char* defaultGatewayHost = "gateway.discord.gg";
+    const char* defaultGatewayPath = "/?v=10&encoding=json";
+    String gatewayHost = defaultGatewayHost;
+    String gatewayPath = defaultGatewayPath;
+
+    if (_resumeGatewayUrl.length() > 0) {
+        _debugLog("Resume gateway URL available: " + _resumeGatewayUrl, DEBUG_LEVEL_VERBOSE);
+        _parseGatewayUrl(_resumeGatewayUrl, gatewayHost, gatewayPath);
+    } else {
+        _debugLog("Using default Discord gateway", DEBUG_LEVEL_VERBOSE);
+    }
+
+    if (gatewayHost.length() == 0) {
+        gatewayHost = defaultGatewayHost;
+    }
+
+    if (gatewayPath.length() == 0) {
+        gatewayPath = defaultGatewayPath;
+    } else if (!gatewayPath.startsWith("/")) {
+        gatewayPath = "/" + gatewayPath;
+    }
+
+    _debugLog("Using gateway host: " + gatewayHost, DEBUG_LEVEL_VERBOSE);
+    _debugLog("Using gateway path: " + gatewayPath, DEBUG_LEVEL_VERBOSE);
+    _debugLog("Using gateway intents mask: " + String((unsigned long)_gatewayIntents), DEBUG_LEVEL_VERBOSE);
+
     // Try different WebSocket configuration
-    _webSocket.beginSSL(gatewayUrl.c_str(), 443, "/?v=10&encoding=json");
+    _webSocket.beginSSL(gatewayHost.c_str(), 443, gatewayPath.c_str());
     _webSocket.setAuthorization("", _botToken.c_str());
     _webSocket.setReconnectInterval(5000);
     _webSocket.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
         switch (type) {
-            case WStype_DISCONNECTED:
+            case WStype_DISCONNECTED: {
                 _wsConnected = false;
                 _wsAuthenticated = false;
                 _debugLog("WebSocket disconnected", DEBUG_LEVEL_WARNING);
-                if (payload != nullptr && length > 0) {
-                    _debugLog("Disconnect code: " + String(payload[0]), DEBUG_LEVEL_WARNING);
+                uint16_t closeCode = 0;
+                if (payload != nullptr && length >= sizeof(uint16_t)) {
+                    closeCode = (static_cast<uint16_t>(payload[0]) << 8) | payload[1];
+                } else if (payload != nullptr && length == 1) {
+                    closeCode = payload[0];
+                }
+
+                if (closeCode != 0) {
+                    _debugLog("Disconnect code: " + String(closeCode), DEBUG_LEVEL_WARNING);
                     // Log disconnect reason based on code
-                    switch(payload[0]) {
+                    switch (closeCode) {
                         case 1000:
                             _debugLog("Disconnect reason: Normal closure", DEBUG_LEVEL_INFO);
                             break;
@@ -504,7 +535,7 @@ bool DiscordAPI::connectWebSocket() {
                             _debugLog("Disconnect reason: Disallowed intent(s)", DEBUG_LEVEL_ERROR);
                             break;
                         default:
-                            _debugLog("Disconnect reason: Unknown code " + String(payload[0]), DEBUG_LEVEL_WARNING);
+                            _debugLog("Disconnect reason: Unknown code " + String(closeCode), DEBUG_LEVEL_WARNING);
                             break;
                     }
                 } else {
@@ -513,7 +544,16 @@ bool DiscordAPI::connectWebSocket() {
                 // Reset heartbeat state on disconnect
                 _lastHeartbeatAck = 0;
                 _heartbeatMissedCount = 0;
+
+                if (_resumeInProgress) {
+                    _debugLog("Resume attempt failed before completion, clearing session data", DEBUG_LEVEL_WARNING);
+                    _resumeInProgress = false;
+                    _sessionId = "";
+                    _resumeGatewayUrl = "";
+                    _sequenceNumber = -1;
+                }
                 break;
+            }
             case WStype_CONNECTED:
                 _wsConnected = true;
                 _connectionStartTime = millis();
@@ -568,30 +608,36 @@ void DiscordAPI::disconnectWebSocket() {
 
 void DiscordAPI::loop() {
     _webSocket.loop();
-    
-    // Handle reconnection if needed
-    if (!_wsConnected || !_wsAuthenticated) {
+
+    unsigned long now = millis();
+
+    if (!_wsConnected) {
         _handleReconnect();
-        return; // Don't send heartbeat if not connected
+        return;
     }
-    
-    // Check connection stability only if connected and authenticated
-    // Only check stability after connection has been established for a while
+
+    if (_heartbeatInterval > 0 && now - _lastHeartbeat >= _heartbeatInterval) {
+        _sendHeartbeat();
+    }
+
+    if (!_wsAuthenticated) {
+        const unsigned long AUTH_TIMEOUT = 15000;
+        if (_connectionStartTime > 0 && now - _connectionStartTime > AUTH_TIMEOUT) {
+            _debugLog("Authentication timed out while waiting for READY event", DEBUG_LEVEL_WARNING);
+            _handleConnectionTimeout();
+            _handleReconnect();
+        }
+        return;
+    }
+
     static unsigned long lastStabilityCheck = 0;
-    if (millis() - lastStabilityCheck > 10000) { // Check every 10 seconds
+    if (now - lastStabilityCheck > 10000) { // Check every 10 seconds
         if (!_checkConnectionStability()) {
             _handleConnectionTimeout();
             _handleReconnect();
             return;
         }
-        lastStabilityCheck = millis();
-    }
-    
-    // Send heartbeat if connected and authenticated
-    if (_heartbeatInterval > 0) {
-        if (millis() - _lastHeartbeat >= _heartbeatInterval) {
-            _sendHeartbeat();
-        }
+        lastStabilityCheck = now;
     }
 }
 
@@ -610,11 +656,13 @@ void DiscordAPI::resetConnectionState() {
     _lastHeartbeatAck = millis();
     _connectionStartTime = millis();
     _heartbeatMissedCount = 0;
+    _resumeInProgress = false;
     _debugLog("Connection state reset", DEBUG_LEVEL_INFO);
 }
 
 void DiscordAPI::forceDisconnect() {
     _debugLog("Force disconnecting WebSocket", DEBUG_LEVEL_WARNING);
+    _resumeInProgress = false;
     
     if (_wsConnected) {
         _webSocket.disconnect();
@@ -626,7 +674,7 @@ void DiscordAPI::forceDisconnect() {
     _lastHeartbeatAck = 0;
     _connectionStartTime = 0;
     _heartbeatMissedCount = 0;
-    _sequenceNumber = 0;
+    _sequenceNumber = -1;
     _sessionId = "";
     
     // Reset reconnection state
@@ -651,6 +699,26 @@ void DiscordAPI::debugConnectionState() {
     _debugLog("Reconnect Delay: " + String(_reconnectDelay) + "ms", DEBUG_LEVEL_INFO);
     _debugLog("Heartbeat Missed Count: " + String(_heartbeatMissedCount), DEBUG_LEVEL_INFO);
     _debugLog("Connection Start Time: " + String(millis() - _connectionStartTime) + "ms ago", DEBUG_LEVEL_INFO);
+}
+
+// Gateway intent configuration
+void DiscordAPI::setGatewayIntents(uint32_t intents) {
+    _gatewayIntents = intents;
+    _debugLog("Gateway intents set to " + String((unsigned long)_gatewayIntents), DEBUG_LEVEL_INFO);
+}
+
+void DiscordAPI::addGatewayIntent(uint32_t intent) {
+    _gatewayIntents |= intent;
+    _debugLog("Gateway intents updated (add) => " + String((unsigned long)_gatewayIntents), DEBUG_LEVEL_VERBOSE);
+}
+
+void DiscordAPI::removeGatewayIntent(uint32_t intent) {
+    _gatewayIntents &= ~intent;
+    _debugLog("Gateway intents updated (remove) => " + String((unsigned long)_gatewayIntents), DEBUG_LEVEL_VERBOSE);
+}
+
+uint32_t DiscordAPI::getGatewayIntents() const {
+    return _gatewayIntents;
 }
 
 // Event handlers
@@ -698,22 +766,36 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
         case OPCODE_HELLO:
             if (doc["d"].is<JsonObject>()) {
                 _heartbeatInterval = doc["d"]["heartbeat_interval"].as<int>();
-                _lastHeartbeat = millis();
+                unsigned long now = millis();
+                _lastHeartbeat = now;
+                _lastHeartbeatAck = now;
+                _heartbeatMissedCount = 0;
+
+                if (_heartbeatInterval > 0) {
+                    _lastHeartbeat = now - _heartbeatInterval;
+                    _debugLog("Scheduling immediate heartbeat after HELLO (interval: " + String(_heartbeatInterval) + "ms)", DEBUG_LEVEL_VERBOSE);
+                }
+
                 _debugLog("Received HELLO, heartbeat interval: " + String(_heartbeatInterval) + "ms", DEBUG_LEVEL_INFO);
                 _debugLog("Session ID: " + _sessionId, DEBUG_LEVEL_VERBOSE);
                 _debugLog("Resume URL: " + _resumeGatewayUrl, DEBUG_LEVEL_VERBOSE);
-                                
-                // Send Identify or Resume immediately after Hello (Discord spec requirement)
-                if ( _sessionId.length() > 0 && _resumeGatewayUrl.length() > 0) {
+
+                bool canResume = (_sessionId.length() > 0 && _resumeGatewayUrl.length() > 0 && _sequenceNumber >= 0);
+                if (canResume) {
                     _debugLog("Attempting to resume session after Hello", DEBUG_LEVEL_INFO);
                     _resume();
                 } else {
-                    _debugLog("No session info, identifying after Hello", DEBUG_LEVEL_INFO);
+                    if (_sessionId.length() > 0 && _resumeGatewayUrl.length() > 0 && _sequenceNumber < 0) {
+                        _debugLog("Stored session data missing sequence number; falling back to IDENTIFY", DEBUG_LEVEL_WARNING);
+                    } else {
+                        _debugLog("No session info, identifying after Hello", DEBUG_LEVEL_INFO);
+                    }
+                    _resumeInProgress = false;
                     _identify();
                 }
             } else {
                 _debugLog("Invalid HELLO message format", DEBUG_LEVEL_ERROR);
-                // Still try to identify even if HELLO format is invalid
+                _resumeInProgress = false;
                 _identify();
             }
             break;
@@ -723,12 +805,18 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
             _heartbeatMissedCount = 0;
             _debugLog("Heartbeat ACK received", DEBUG_LEVEL_VERBOSE);
             break;
+
+        case OPCODE_HEARTBEAT:
+            _debugLog("Received heartbeat request from Discord", DEBUG_LEVEL_VERBOSE);
+            _sendHeartbeat();
+            break;
             
         case OPCODE_DISPATCH:
             if (eventType == EVENT_READY) {
                 _debugLog("Received READY event from Discord", DEBUG_LEVEL_INFO);
                 if (doc["d"].is<JsonObject>()) {
                     _wsAuthenticated = true;
+                    _resumeInProgress = false;
                     _sessionId = doc["d"]["session_id"].as<String>();
                     _resumeGatewayUrl = doc["d"]["resume_gateway_url"].as<String>();
                     _debugLog("Bot ready! Session ID: " + _sessionId, DEBUG_LEVEL_INFO);
@@ -769,6 +857,7 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
             
         case OPCODE_INVALID_SESSION:
             _wsAuthenticated = false;
+            _resumeInProgress = false;
             _debugLog("Invalid session, retrying identify...", DEBUG_LEVEL_WARNING);
             // Reset session info for fresh identify
             _sessionId = "";
@@ -787,6 +876,10 @@ void DiscordAPI::_handleWebSocketEvent(JsonDocument& doc) {
         case OPCODE_RESUMED:
             _debugLog("Connection resumed successfully", DEBUG_LEVEL_INFO);
             _wsAuthenticated = true;
+            _resumeInProgress = false;
+            _connectionStartTime = millis();
+            _lastHeartbeatAck = millis();
+            _heartbeatMissedCount = 0;
             break;
             
         default:
@@ -830,6 +923,7 @@ void DiscordAPI::_sendHeartbeat() {
 }
 
 void DiscordAPI::_identify() {
+    _resumeInProgress = false;
     JsonDocument doc;
     doc["op"] = OPCODE_IDENTIFY;
     
@@ -844,9 +938,9 @@ void DiscordAPI::_identify() {
     // d["compress"] = false;
     // d["large_threshold"] = 250;
     
-    // Add intents - required for receiving messages
-    d["intents"] = 512; // MESSAGE_CONTENT_INTENT (1 << 9) - allows reading message content
-    
+    // Add intents - configurable via setGatewayIntents()
+    d["intents"] = _gatewayIntents;
+
     String message = "";
     serializeJson(doc, message);
 
@@ -884,7 +978,14 @@ void DiscordAPI::_resume() {
         return;
     }
     
+    if (_sequenceNumber < 0) {
+        _debugLog("No sequence number available for resume, identifying...", DEBUG_LEVEL_WARNING);
+        _identify();
+        return;
+    }
+    
     _debugLog("Attempting to resume session: " + _sessionId, DEBUG_LEVEL_INFO);
+    _resumeInProgress = true;
     
     JsonDocument doc;
     doc["op"] = OPCODE_RESUME;
@@ -1044,6 +1145,8 @@ void DiscordAPI::_handleReconnect() {
         _wsConnected = false;
         _wsAuthenticated = false;
     }
+
+    _resumeInProgress = false;
     
     // Add delay before reconnecting to avoid spam (longer delay for stability)
     delay(2000);
@@ -1093,6 +1196,7 @@ bool DiscordAPI::_checkConnectionStability() {
 
 void DiscordAPI::_handleConnectionTimeout() {
     _debugLog("Connection timeout detected, forcing disconnect", DEBUG_LEVEL_WARNING);
+    _resumeInProgress = false;
     
     if (_wsConnected) {
         _webSocket.disconnect();
@@ -1105,6 +1209,49 @@ void DiscordAPI::_handleConnectionTimeout() {
     _reconnectDelay = 5000;
     _lastReconnectAttempt = 0;
 }
+
+void DiscordAPI::_parseGatewayUrl(const String& url, String& hostOut, String& pathOut) {
+    if (url.length() == 0) {
+        return;
+    }
+
+    String working = url;
+    working.trim();
+
+    if (working.startsWith("wss://")) {
+        working = working.substring(6);
+    } else if (working.startsWith("https://")) {
+        working = working.substring(8);
+    } else if (working.startsWith("ws://")) {
+        working = working.substring(5);
+    }
+
+    int slashIndex = working.indexOf("/");
+    if (slashIndex == -1) {
+        working.trim();
+        if (working.length() > 0) {
+            hostOut = working;
+        }
+        return;
+    }
+
+    String hostPart = working.substring(0, slashIndex);
+    String pathPart = working.substring(slashIndex);
+    hostPart.trim();
+    pathPart.trim();
+
+    if (hostPart.length() > 0) {
+        hostOut = hostPart;
+    }
+
+    if (pathPart.length() > 0) {
+        if (!pathPart.startsWith("/")) {
+            pathPart = "/" + pathPart;
+        }
+        pathOut = pathPart;
+    }
+}
+
 
 void DiscordAPI::_parseGuild(JsonObject guildObj, DiscordGuild& guild) {
     if (guildObj.isNull()) {
@@ -1242,3 +1389,7 @@ String DiscordAPI::getLastError() {
 void DiscordAPI::clearError() {
     // Clear any error state
 }
+
+
+
+

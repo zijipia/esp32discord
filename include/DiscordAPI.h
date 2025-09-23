@@ -39,6 +39,28 @@
 #define EVENT_GUILD_UPDATE "GUILD_UPDATE"
 #define EVENT_GUILD_DELETE "GUILD_DELETE"
 
+// Gateway intents
+#define DISCORD_INTENT_GUILDS (1UL << 0)
+#define DISCORD_INTENT_GUILD_MEMBERS (1UL << 1)
+#define DISCORD_INTENT_GUILD_BANS (1UL << 2)
+#define DISCORD_INTENT_GUILD_EMOJIS_AND_STICKERS (1UL << 3)
+#define DISCORD_INTENT_GUILD_INTEGRATIONS (1UL << 4)
+#define DISCORD_INTENT_GUILD_WEBHOOKS (1UL << 5)
+#define DISCORD_INTENT_GUILD_INVITES (1UL << 6)
+#define DISCORD_INTENT_GUILD_VOICE_STATES (1UL << 7)
+#define DISCORD_INTENT_GUILD_PRESENCES (1UL << 8)
+#define DISCORD_INTENT_GUILD_MESSAGES (1UL << 9)
+#define DISCORD_INTENT_GUILD_MESSAGE_REACTIONS (1UL << 10)
+#define DISCORD_INTENT_GUILD_MESSAGE_TYPING (1UL << 11)
+#define DISCORD_INTENT_DIRECT_MESSAGES (1UL << 12)
+#define DISCORD_INTENT_DIRECT_MESSAGE_REACTIONS (1UL << 13)
+#define DISCORD_INTENT_DIRECT_MESSAGE_TYPING (1UL << 14)
+#define DISCORD_INTENT_MESSAGE_CONTENT (1UL << 15)
+#define DISCORD_INTENT_GUILD_SCHEDULED_EVENTS (1UL << 16)
+#define DISCORD_INTENT_AUTO_MODERATION_CONFIGURATION (1UL << 17)
+#define DISCORD_INTENT_AUTO_MODERATION_EXECUTION (1UL << 18)
+#define DISCORD_INTENT_DEFAULT (DISCORD_INTENT_GUILDS | DISCORD_INTENT_GUILD_MESSAGES | DISCORD_INTENT_MESSAGE_CONTENT)
+
 // Message types
 #define MESSAGE_TYPE_DEFAULT 0
 #define MESSAGE_TYPE_RECIPIENT_ADD 1
@@ -317,6 +339,7 @@ private:
     // WebSocket state
     bool _wsConnected;
     bool _wsAuthenticated;
+    bool _resumeInProgress;
     int _heartbeatInterval;
     unsigned long _lastHeartbeat;
     int _sequenceNumber;
@@ -334,6 +357,8 @@ private:
     unsigned long _connectionStartTime;
     int _heartbeatMissedCount;
     int _maxHeartbeatMissed;
+
+    uint32_t _gatewayIntents;
 
     // Event callbacks
     void (*_onReady)(DiscordUser user);
@@ -359,6 +384,7 @@ private:
     void _handleReconnect();
     bool _checkConnectionStability();
     void _handleConnectionTimeout();
+    void _parseGatewayUrl(const String& url, String& hostOut, String& pathOut);
 
 public:
     // Constructor
@@ -398,6 +424,11 @@ public:
     void resetConnectionState();
     void forceDisconnect();
     void debugConnectionState();
+
+    void setGatewayIntents(uint32_t intents);
+    void addGatewayIntent(uint32_t intent);
+    void removeGatewayIntent(uint32_t intent);
+    uint32_t getGatewayIntents() const;
 
     // Event handlers
     void onReady(void (*callback)(DiscordUser user));
